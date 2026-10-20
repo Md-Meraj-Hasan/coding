@@ -1,5 +1,5 @@
 
-name: AndroWish Native Build Probe
+name: AndroWish Native Build Probe Test
 
 on:
   workflow_dispatch:
