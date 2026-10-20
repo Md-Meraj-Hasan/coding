@@ -1,0 +1,103 @@
+name: AndroWish Native Build Probe
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-androwish:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    steps:
+      - name: Checkout probe
+        uses: actions/checkout@v4
+
+      - name: Set up Java 8 for legacy Android build
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '8'
+
+      - name: Install Android SDK / NDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android build tools
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sdkmanager --install "platform-tools" "platforms;android-34" "build-tools;34.0.0" "ndk;25.2.9519653"
+          echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$ANDROID_HOME" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/25.2.9519653" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/25.2.9519653" >> "$GITHUB_ENV"
+
+      - name: Fetch pinned official AndroWish source
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p source
+          curl --fail --location --retry 3             "https://androwish.org/download/androwish-8e9d986cd1.zip"             --output source/androwish-source.zip
+          unzip -q source/androwish-source.zip -d source/unpacked
+          find source/unpacked -maxdepth 3 -type f \( -name gradlew -o -name settings.gradle -o -name build.gradle -o -name README.txt \) -print
+          ROOT="$(find source/unpacked -type f -name gradlew -print -quit | xargs -r dirname)"
+          if [ -z "$ROOT" ]; then
+            echo "Could not locate gradlew in official source archive" | tee build.log
+            exit 1
+          fi
+          echo "$ROOT" > source/project-root.txt
+          echo "Source root: $ROOT" | tee -a build.log
+          unzip -l source/androwish-source.zip | head -80 > source/archive-list.txt
+
+      - name: Build standalone Android Tcl/Tk APK
+        shell: bash
+        run: |
+          set +e
+          ROOT="$(cat source/project-root.txt)"
+          cd "$ROOT"
+          chmod +x ./gradlew
+          ./gradlew --no-daemon assembleDebug 2>&1 | tee "$GITHUB_WORKSPACE/build.log"
+          RESULT=${PIPESTATUS[0]}
+          echo "$RESULT" > "$GITHUB_WORKSPACE/build-exit-code.txt"
+          exit "$RESULT"
+
+      - name: Collect environment and build evidence
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "Runner: $(uname -a)"
+            echo "Java:"
+            java -version 2>&1
+            echo "ANDROID_HOME=${ANDROID_HOME:-unset}"
+            echo "ANDROID_NDK_HOME=${ANDROID_NDK_HOME:-unset}"
+            echo "Build exit code: $(cat build-exit-code.txt 2>/dev/null || echo not-reached)"
+            echo "APK files:"
+            find source/unpacked -type f -name '*.apk' -print 2>/dev/null || true
+            echo "Native library files:"
+            find source/unpacked -type f -name '*.so' -print 2>/dev/null | head -100 || true
+          } > environment.txt
+
+      - name: Upload logs and source summary (always)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: androwish-build-diagnostics
+          path: |
+            build.log
+            build-exit-code.txt
+            environment.txt
+            source/project-root.txt
+            source/archive-list.txt
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload standalone Tcl/Tk APK (if built)
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: androwish-native-apk
+          path: source/unpacked/**/build/outputs/apk/**/*.apk
+          if-no-files-found: warn
+          retention-days: 14
